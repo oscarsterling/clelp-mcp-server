@@ -5,12 +5,44 @@ import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextpro
 // Clelp API configuration
 const CLELP_API_URL = process.env.CLELP_API_URL || "https://clelp.ai/api";
 const CLELP_API_KEY = process.env.CLELP_API_KEY || "";
-// Rate limiting state (in-memory for simplicity)
+// Security: Validate API URL domain
+const ALLOWED_API_DOMAINS = ["clelp.ai", "www.clelp.ai", "localhost"];
+function validateApiUrl(url) {
+    try {
+        const parsed = new URL(url);
+        return ALLOWED_API_DOMAINS.some(d => parsed.hostname === d || parsed.hostname.endsWith(`.${d}`));
+    }
+    catch {
+        return false;
+    }
+}
+if (!validateApiUrl(CLELP_API_URL)) {
+    console.error(`Invalid CLELP_API_URL: must be a clelp.ai domain`);
+    process.exit(1);
+}
+// Security: Input length limits
+const MAX_QUERY_LENGTH = 500;
+const MAX_COMMENTARY_LENGTH = 5000;
+const MAX_CATEGORY_LENGTH = 100;
+const MAX_SKILL_ID_LENGTH = 100;
+// Security: Validate skill_id format (UUID or slug)
+const SKILL_ID_PATTERN = /^[a-zA-Z0-9_@./-]{1,100}$/;
+// Rate limiting state (in-memory)
 const rateLimitState = new Map();
-const searchCooldowns = new Map(); // agentKey -> skillId -> timestamp
 const MAX_RATINGS_PER_DAY = 10;
-const RATING_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour cooldown after searching before rating
-const MIN_COMMENTARY_LENGTH = 50;
+const MIN_COMMENTARY_LENGTH = 20;
+// Security: Fetch with timeout
+const FETCH_TIMEOUT_MS = 30000;
+async function fetchWithTimeout(url, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    }
+    finally {
+        clearTimeout(timeout);
+    }
+}
 // Tools definition
 const tools = [
     {
@@ -48,7 +80,7 @@ const tools = [
             properties: {
                 skill_id: {
                     type: "string",
-                    description: "The skill ID or slug (e.g., 'postgres-mcp' or UUID)"
+                    description: "The skill ID (UUID) or slug (e.g., 'filesystem-mcp' or 'f2ce2a44-a22c-4a22-85e2-48a92fa72105')"
                 }
             },
             required: ["skill_id"]
@@ -56,13 +88,13 @@ const tools = [
     },
     {
         name: "clelp_rate",
-        description: "Submit a rating for a skill you've used. Requires API key. Your review helps other AI agents find quality tools.",
+        description: "Submit a rating for a skill you've used. Requires API key (set CLELP_API_KEY env var). Your review helps other AI agents find quality tools.",
         inputSchema: {
             type: "object",
             properties: {
                 skill_id: {
                     type: "string",
-                    description: "The skill ID or slug to rate"
+                    description: "The skill ID (UUID) or slug to rate. Use clelp_search first to find the skill."
                 },
                 claws: {
                     type: "number",
@@ -72,25 +104,7 @@ const tools = [
                 },
                 commentary: {
                     type: "string",
-                    description: "Your review explaining why you gave this rating. Must be at least 50 characters. Be specific about what worked or didn't."
-                },
-                reliability: {
-                    type: "number",
-                    minimum: 1,
-                    maximum: 5,
-                    description: "Optional: Reliability rating (1-5)"
-                },
-                security: {
-                    type: "number",
-                    minimum: 1,
-                    maximum: 5,
-                    description: "Optional: Security rating (1-5)"
-                },
-                speed: {
-                    type: "number",
-                    minimum: 1,
-                    maximum: 5,
-                    description: "Optional: Speed/performance rating (1-5)"
+                    description: "Your review explaining why you gave this rating. Must be at least 20 characters. Be specific about what worked or didn't."
                 }
             },
             required: ["skill_id", "claws", "commentary"]
@@ -110,43 +124,33 @@ function checkRateLimit(apiKey) {
         return {
             allowed: false,
             remaining: 0,
-            resetIn: Math.ceil((state.resetTime - now) / 1000 / 60) // minutes
+            resetIn: Math.ceil((state.resetTime - now) / 1000 / 60)
         };
     }
     return { allowed: true, remaining: MAX_RATINGS_PER_DAY - state.count };
 }
-// Helper: Track search for cooldown
-function trackSearch(apiKey, skillId) {
-    if (!searchCooldowns.has(apiKey)) {
-        searchCooldowns.set(apiKey, new Map());
-    }
-    searchCooldowns.get(apiKey).set(skillId, Date.now());
-}
-// Helper: Check if cooldown has passed
-function checkCooldown(apiKey, skillId) {
-    const searches = searchCooldowns.get(apiKey);
-    if (!searches)
-        return { allowed: true };
-    const searchTime = searches.get(skillId);
-    if (!searchTime)
-        return { allowed: true };
-    const elapsed = Date.now() - searchTime;
-    if (elapsed < RATING_COOLDOWN_MS) {
-        return {
-            allowed: false,
-            waitMinutes: Math.ceil((RATING_COOLDOWN_MS - elapsed) / 1000 / 60)
-        };
-    }
-    return { allowed: true };
-}
-// Helper: Increment rate limit counter
 function incrementRateLimit(apiKey) {
     const state = rateLimitState.get(apiKey);
     if (state) {
         state.count++;
     }
 }
-// API call helper
+// Security: Sanitize error messages (strip internal details)
+function sanitizeError(error) {
+    if (error instanceof Error) {
+        const msg = error.message;
+        // Strip stack traces and internal paths
+        if (msg.includes("Clelp API error"))
+            return msg;
+        if (msg.includes("fetch"))
+            return "Network error connecting to Clelp API. Please try again.";
+        if (msg.includes("abort"))
+            return "Request timed out. Please try again.";
+        return "An unexpected error occurred. Please try again.";
+    }
+    return "An unexpected error occurred.";
+}
+// API call helper with timeout and sanitized errors
 async function clelpAPI(endpoint, options = {}) {
     const url = `${CLELP_API_URL}${endpoint}`;
     const headers = {
@@ -156,33 +160,44 @@ async function clelpAPI(endpoint, options = {}) {
     if (CLELP_API_KEY) {
         headers["X-API-Key"] = CLELP_API_KEY;
     }
-    const response = await fetch(url, { ...options, headers });
+    const response = await fetchWithTimeout(url, { ...options, headers });
     if (!response.ok) {
         const error = await response.text();
         throw new Error(`Clelp API error (${response.status}): ${error}`);
     }
     return response.json();
 }
+// Helper: Resolve slug to UUID by searching
+async function resolveSkillId(skillIdOrSlug) {
+    // If it looks like a UUID, return as-is
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (uuidPattern.test(skillIdOrSlug)) {
+        return skillIdOrSlug;
+    }
+    // Otherwise, get the skill by slug to find the UUID
+    const skill = await clelpAPI(`/skills/${encodeURIComponent(skillIdOrSlug)}`);
+    if (skill && skill.id) {
+        return skill.id;
+    }
+    throw new Error(`Could not resolve skill: ${skillIdOrSlug}`);
+}
 // Tool handlers
 async function handleSearch(args) {
-    const limit = Math.min(args.limit || 10, 25);
-    // Build query params
+    // Security: Validate input lengths
+    const query = (args.query || "").slice(0, MAX_QUERY_LENGTH);
+    const category = args.category ? args.category.slice(0, MAX_CATEGORY_LENGTH) : undefined;
+    const limit = Math.min(Math.max(args.limit || 10, 1), 25);
     const params = new URLSearchParams({
-        search: args.query,
+        search: query,
         limit: limit.toString()
     });
-    if (args.category)
-        params.set("category", args.category);
+    if (category)
+        params.set("category", category);
     if (args.type)
         params.set("type", args.type);
     const response = await clelpAPI(`/skills?${params.toString()}`);
-    const skills = response.skills || response; // Handle both { skills: [...] } and [...] formats
-    // Track searches for cooldown (if we have an API key)
-    if (CLELP_API_KEY && Array.isArray(skills)) {
-        skills.forEach((skill) => trackSearch(CLELP_API_KEY, skill.id));
-    }
-    // Format response
-    const results = skills.map((skill) => ({
+    const skills = response.skills || response;
+    const results = (Array.isArray(skills) ? skills : []).map((skill) => ({
         id: skill.id,
         name: skill.name,
         slug: skill.slug,
@@ -202,11 +217,12 @@ async function handleSearch(args) {
     };
 }
 async function handleGetSkill(args) {
-    const skill = await clelpAPI(`/skills/${args.skill_id}`);
-    // Track for cooldown
-    if (CLELP_API_KEY) {
-        trackSearch(CLELP_API_KEY, skill.id);
+    // Security: Validate skill_id
+    const skillId = (args.skill_id || "").slice(0, MAX_SKILL_ID_LENGTH);
+    if (!skillId || !SKILL_ID_PATTERN.test(skillId)) {
+        return { error: "Invalid skill_id format. Use a UUID or slug (e.g., 'filesystem-mcp')." };
     }
+    const skill = await clelpAPI(`/skills/${encodeURIComponent(skillId)}`);
     return {
         id: skill.id,
         name: skill.name,
@@ -230,14 +246,24 @@ async function handleRate(args) {
     if (!CLELP_API_KEY) {
         return {
             success: false,
-            error: "API key required to rate skills. Get one at clelp.ai/get-api-key"
+            error: "API key required to rate skills. Set CLELP_API_KEY environment variable. Get a free key at clelp.ai/get-api-key"
         };
     }
-    // Validate commentary length
-    if (args.commentary.length < MIN_COMMENTARY_LENGTH) {
+    // Security: Validate skill_id
+    const skillIdRaw = (args.skill_id || "").slice(0, MAX_SKILL_ID_LENGTH);
+    if (!skillIdRaw || !SKILL_ID_PATTERN.test(skillIdRaw)) {
+        return { success: false, error: "Invalid skill_id format. Use a UUID or slug." };
+    }
+    // Validate claws
+    if (!args.claws || args.claws < 1 || args.claws > 5 || !Number.isInteger(args.claws)) {
+        return { success: false, error: "Claws must be an integer from 1 to 5." };
+    }
+    // Validate commentary
+    const commentary = (args.commentary || "").slice(0, MAX_COMMENTARY_LENGTH);
+    if (commentary.length < MIN_COMMENTARY_LENGTH) {
         return {
             success: false,
-            error: `Commentary must be at least ${MIN_COMMENTARY_LENGTH} characters. You wrote ${args.commentary.length}. Please provide more detail about your experience.`
+            error: `Commentary must be at least ${MIN_COMMENTARY_LENGTH} characters. You wrote ${commentary.length}. Please provide more detail.`
         };
     }
     // Check rate limit
@@ -245,49 +271,37 @@ async function handleRate(args) {
     if (!rateLimit.allowed) {
         return {
             success: false,
-            error: `Rate limit exceeded. You can submit ${MAX_RATINGS_PER_DAY} ratings per day. Try again in ${rateLimit.resetIn} minutes.`
+            error: `Rate limit exceeded. Max ${MAX_RATINGS_PER_DAY} ratings per day. Try again in ${rateLimit.resetIn} minutes.`
         };
     }
-    // Check cooldown (must have searched/viewed skill at least 1 hour ago)
-    const cooldown = checkCooldown(CLELP_API_KEY, args.skill_id);
-    if (!cooldown.allowed) {
-        return {
-            success: false,
-            error: `Please wait ${cooldown.waitMinutes} more minutes before rating. This cooldown ensures you've actually used the skill. Search for it again after trying it.`
-        };
+    // Resolve slug to UUID if needed (the ratings API requires UUID)
+    let skillId;
+    try {
+        skillId = await resolveSkillId(skillIdRaw);
     }
-    // Validate claws
-    if (args.claws < 1 || args.claws > 5 || !Number.isInteger(args.claws)) {
-        return {
-            success: false,
-            error: "Claws must be an integer from 1 to 5"
-        };
+    catch {
+        return { success: false, error: `Skill "${skillIdRaw}" not found. Use clelp_search to find valid skills.` };
     }
     // Submit rating
     const rating = await clelpAPI("/ratings", {
         method: "POST",
         body: JSON.stringify({
-            skill_id: args.skill_id,
+            skill_id: skillId,
             claws: args.claws,
-            commentary: args.commentary,
-            reliability: args.reliability,
-            security: args.security,
-            speed: args.speed
+            commentary: commentary
         })
     });
-    // Increment rate limit counter
     incrementRateLimit(CLELP_API_KEY);
     return {
         success: true,
         message: "Thank you for your rating! Your review helps other AI agents find quality tools.",
-        rating_id: rating.id,
         remaining_ratings_today: rateLimit.remaining - 1
     };
 }
 // Create server
 const server = new Server({
     name: "clelp-mcp",
-    version: "1.0.0",
+    version: "1.1.1",
 }, {
     capabilities: {
         tools: {},
@@ -324,12 +338,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
     }
     catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
         return {
             content: [
                 {
                     type: "text",
-                    text: JSON.stringify({ error: message }, null, 2),
+                    text: JSON.stringify({ error: sanitizeError(error) }, null, 2),
                 },
             ],
             isError: true,
