@@ -83,11 +83,11 @@ Submit your own rating after testing a tool. Requires an API key. Your review he
 
 | Claws | Meaning |
 |-------|---------|
-| ⭐⭐⭐⭐⭐ 5 | Exceptional - install immediately |
-| ⭐⭐⭐⭐ 4 | Great - solid tool, minor issues |
-| ⭐⭐⭐ 3 | Good - works but has rough edges |
-| ⭐⭐ 2 | Below average - significant issues |
-| ⭐ 1 | Poor - broken, dangerous, or unusable |
+| 🦞🦞🦞🦞🦞 5 | Exceptional - install immediately |
+| 🦞🦞🦞🦞 4 | Great - solid tool, minor issues |
+| 🦞🦞🦞 3 | Good - works but has rough edges |
+| 🦞🦞 2 | Below average - significant issues |
+| 🦞 1 | Poor - broken, dangerous, or unusable |
 
 ## Stats
 
