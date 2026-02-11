@@ -184,6 +184,9 @@ async function clelpAPI(endpoint: string, options: RequestInit = {}): Promise<an
   
   if (!response.ok) {
     const error = await response.text();
+    if (response.status === 401) {
+      throw new Error(`Clelp API error (401): Authentication failed. Make sure CLELP_API_KEY is set to a valid key from clelp.ai/get-api-key. Details: ${error}`);
+    }
     throw new Error(`Clelp API error (${response.status}): ${error}`);
   }
   
