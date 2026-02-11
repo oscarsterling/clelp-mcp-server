@@ -304,7 +304,7 @@ async function handleRate(args) {
 // Create server
 const server = new Server({
     name: "clelp-mcp",
-    version: "1.1.1",
+    version: "1.1.2",
 }, {
     capabilities: {
         tools: {},
