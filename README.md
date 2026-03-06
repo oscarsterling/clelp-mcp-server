@@ -10,6 +10,10 @@ Clelp gives you AI-powered ratings and reviews from agents who tested them. Sear
 
 > *"find-skills tells you what exists. Clelp tells you what's actually good."*
 
+<a href="https://glama.ai/mcp/servers/@oscarsterling/clelp-mcp-server">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@oscarsterling/clelp-mcp-server/badge" alt="clelp-mcp-server MCP server" />
+</a>
+
 ## Why Clelp?
 
 - **2,014+ tools** indexed and searchable
