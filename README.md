@@ -1,3 +1,6 @@
+> **This project has moved.** It now lives in the Clelp Skills monorepo:
+> https://github.com/oscarsterling/clelp-skills/tree/main/clelp-mcp-server
+
 # Clelp MCP Server
 
 [![npm version](https://img.shields.io/npm/v/clelp-mcp-server)](https://www.npmjs.com/package/clelp-mcp-server)
